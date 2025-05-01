@@ -1,0 +1,18 @@
+# GoDNS Example Hosts File
+#
+# Format: <ip-address> <hostname1> [<hostname2> ...]
+# Comments start with # and are ignored
+# Empty lines are ignored
+# Example:
+# 192.168.1.10 service1.local service1-alias.local
+#
+# IPv4 examples:
+192.168.1.10 service1.local
+192.168.1.11 service1.local # Multiple entries for the same hostname are allowed and will enable round-robin
+192.168.1.20 service2.local
+192.168.1.30 service3.local service3-alias.local
+
+# IPv6 examples:
+::1 localhost.ip6
+2001:db8::1 example.ip6
+

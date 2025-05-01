@@ -1,0 +1,34 @@
+server:
+  address: "127.0.0.1"
+  port: 10053  # Using non-privileged port for testing
+  cache_ttl: "1s"  # Very short TTL for round-robin testing
+
+upstream:
+  servers:
+    - "8.8.8.8:53"
+    - "1.1.1.1:53"
+  timeout: "5s"
+
+plugins:
+  file:
+    enabled: true
+    path: "examples/hosts"  # Use the example hosts file
+    refresh_interval: "10s"  # Short refresh interval for testing
+  
+  memory:
+    enabled: true
+    entries:
+      - hostname: "test.local"
+        ips: ["192.168.1.100"]
+      - hostname: "roundrobin.local"
+        ips: ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    
+rest:
+  enabled: true
+  address: "127.0.0.1"
+  port: 10080  # Using non-privileged port for testing
+
+logging:
+  level: "debug"  # Set to debug for verbose logging
+  format: "text"
+
