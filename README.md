@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Godns logo" width="180">
+</p>
+
 # GoDNS
 
 ## Project Overview
