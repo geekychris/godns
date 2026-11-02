@@ -72,7 +72,6 @@ func (s *DNSServer) RegisterResolver(resolver api.Resolver) {
 	s.logger.Infof("Registered resolver: %s", resolver.Name())
 }
 
-
 // SetRESTServer sets the REST API server
 func (s *DNSServer) SetRESTServer(server rest.Server) {
 	s.restServer = server
@@ -90,10 +89,10 @@ func (s *DNSServer) Start() error {
 	}
 
 	s.logger.Infof("Starting DNS server on %s (UDP)", addr)
-	
+
 	// Start periodic cache cleanup
 	go s.periodicCacheCleanup()
-	
+
 	// Start the DNS server (this will block until the server is stopped)
 	return s.server.ListenAndServe()
 }
@@ -141,7 +140,7 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 			if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
 				hostname = hostname[:len(hostname)-1]
 			}
-			
+
 			hostname = strings.ToLower(hostname)
 
 			// Try to resolve using cache first
@@ -159,11 +158,11 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 					}
 					m.Answer = append(m.Answer, rr)
 				}
-				
+
 				s.metrics.mutex.Lock()
 				s.metrics.cacheHits++
 				s.metrics.mutex.Unlock()
-				
+
 				continue
 			}
 
@@ -172,10 +171,10 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 			ips, err := s.resolveWithPlugins(hostname)
 			if err == nil && len(ips) > 0 {
 				s.logger.Debugf("Resolved %s using plugins: %v", hostname, ips)
-				
+
 				// Cache the result
 				s.cacheResult(hostname, ips)
-				
+
 				for _, ip := range ips {
 					rr := &dns.A{
 						Hdr: dns.RR_Header{
@@ -188,11 +187,11 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 					}
 					m.Answer = append(m.Answer, rr)
 				}
-				
+
 				s.metrics.mutex.Lock()
 				s.metrics.pluginResolutions++
 				s.metrics.mutex.Unlock()
-				
+
 				resolved = true
 			}
 
@@ -201,10 +200,10 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 				ips, err := s.forwardQuery(hostname)
 				if err == nil && len(ips) > 0 {
 					s.logger.Debugf("Resolved %s using upstream: %v", hostname, ips)
-					
+
 					// Cache the result
 					s.cacheResult(hostname, ips)
-					
+
 					for _, ip := range ips {
 						rr := &dns.A{
 							Hdr: dns.RR_Header{
@@ -217,21 +216,21 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 						}
 						m.Answer = append(m.Answer, rr)
 					}
-					
+
 					s.metrics.mutex.Lock()
 					s.metrics.forwardedQueries++
 					s.metrics.mutex.Unlock()
-					
+
 					resolved = true
 				}
 			}
 
 			if !resolved {
 				s.logger.Warnf("Failed to resolve %s", hostname)
-				
+
 				// Set NXDOMAIN (Name Error) response code for unresolvable hostnames
 				m.SetRcode(r, dns.RcodeNameError)
-				
+
 				s.metrics.mutex.Lock()
 				s.metrics.failedQueries++
 				s.metrics.mutex.Unlock()
@@ -242,10 +241,10 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 			if err == nil {
 				// Replace our empty reply with the forwarded response
 				*m = *response
-				break  // We've replaced the entire message, so we're done
+				break // We've replaced the entire message, so we're done
 			} else {
 				s.logger.Warnf("Failed to forward non-A query: %v", err)
-				
+
 				// For non-A records, the response should be NOERROR even if we don't have records
 				// This indicates the domain exists but we don't have that record type
 				m.SetRcode(r, dns.RcodeSuccess)
@@ -316,7 +315,7 @@ func (s *DNSServer) forwardQuery(hostname string) ([]net.IP, error) {
 
 	for _, server := range s.config.Upstream.Servers {
 		c := &dns.Client{
-			Timeout: s.config.Upstream.Timeout * time.Second,
+			Timeout: s.config.Upstream.Timeout,
 		}
 		r, _, err := c.Exchange(m, server)
 		if err != nil {
@@ -353,7 +352,7 @@ func (s *DNSServer) forwardQueryRaw(r *dns.Msg) (*dns.Msg, error) {
 
 	for _, server := range s.config.Upstream.Servers {
 		c := &dns.Client{
-			Timeout: s.config.Upstream.Timeout * time.Second,
+			Timeout: s.config.Upstream.Timeout,
 		}
 		resp, _, err := c.Exchange(r, server)
 		if err != nil {
