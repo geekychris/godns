@@ -4,16 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/http"
-	"net/http/httptest"
-	"testing"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"testing"
 )
 
 // Response/Request types for testing
@@ -26,6 +25,7 @@ type ResolveResponse struct {
 	Hostname string   `json:"hostname"`
 	IPs      []string `json:"ips"`
 }
+
 // MockMemoryPlugin mocks the memory plugin for testing
 type MockMemoryPlugin struct {
 	mock.Mock

@@ -364,6 +364,7 @@ func (r *CustomRoundRobinResolver) Name() string {
 func (r *CustomRoundRobinResolver) Init(config map[string]interface{}) error {
 	return nil
 }
+
 // TestCacheTTLBehavior verifies that the cache TTL is properly handled
 func TestCacheTTLBehavior(t *testing.T) {
 	// Create a server with a short cache TTL
@@ -391,7 +392,7 @@ func TestCacheTTLBehavior(t *testing.T) {
 	server.cacheMutex.RUnlock()
 
 	// Verify the TTL is close to what we set
-	assert.InDelta(t, cfg.Server.CacheTTL.Milliseconds(), ttlRemaining.Milliseconds(), 100, 
+	assert.InDelta(t, cfg.Server.CacheTTL.Milliseconds(), ttlRemaining.Milliseconds(), 100,
 		"Cache entry TTL should be close to the configured value")
 
 	// Create a DNS response and check TTL in record
@@ -399,20 +400,20 @@ func TestCacheTTLBehavior(t *testing.T) {
 	m.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
 	mockWriter := &MockResponseWriter{}
 	server.handleDNSRequest(mockWriter, m)
-	
+
 	// Verify the DNS TTL in the response header
 	resp := mockWriter.writtenMsg
 	require.NotNil(t, resp)
 	assert.Len(t, resp.Answer, 1, "Response should have one answer")
-	
+
 	aRecord, ok := resp.Answer[0].(*dns.A)
 	require.True(t, ok, "Answer should be an A record")
-	assert.Equal(t, uint32(cfg.Server.CacheTTL.Seconds()), aRecord.Hdr.Ttl, 
+	assert.Equal(t, uint32(cfg.Server.CacheTTL.Seconds()), aRecord.Hdr.Ttl,
 		"TTL in DNS response should match config")
 
 	// Wait for the cache to expire
 	time.Sleep(cfg.Server.CacheTTL + 100*time.Millisecond)
-	
+
 	// Verify entry is no longer in cache
 	result = server.resolveFromCache(hostname)
 	assert.Nil(t, result, "Entry should have expired from cache")
@@ -423,21 +424,21 @@ func TestRESTAPIIntegration(t *testing.T) {
 	cfg := createTestConfig()
 	logger := createTestLogger()
 	server := NewDNSServer(cfg, logger)
-	
+
 	// Create a mock REST server
 	mockRESTServer := new(MockRESTServer)
 	mockRESTServer.On("Stop").Return(nil)
-	
+
 	// Set the REST server
 	server.SetRESTServer(mockRESTServer)
-	
+
 	// Verify the REST server was set
 	assert.Equal(t, mockRESTServer, server.restServer)
-	
+
 	// Test clean server shutdown with REST server
 	err := server.Stop()
 	assert.NoError(t, err, "Server shutdown should succeed")
-	
+
 	// Verify that the REST server's Stop method was called
 	mockRESTServer.AssertExpectations(t)
 }

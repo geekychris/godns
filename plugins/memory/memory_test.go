@@ -156,7 +156,7 @@ func TestThreadSafety(t *testing.T) {
 					t.Errorf("Error resolving hostname: %v", err)
 					return
 				}
-				
+
 				resultsMutex.Lock()
 				results[goroutineID*numRequests+j] = resolvedIPs[0]
 				resultsMutex.Unlock()
@@ -233,7 +233,7 @@ func TestErrorHandling(t *testing.T) {
 
 	// Test can resolve behavior
 	assert.False(t, mp.CanResolve("nonexistent.local"))
-	
+
 	err = mp.AddEntry("exists.local", stringsToIPs([]string{"192.168.1.10"}))
 	require.NoError(t, err)
 	assert.True(t, mp.CanResolve("exists.local"))

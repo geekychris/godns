@@ -127,8 +127,8 @@ func (mp *MemoryPlugin) Resolve(hostname string) ([]net.IP, error) {
 	}
 
 	// Atomically increment the counter and get the next IP
-	idx := int(atomic.AddUint64(counter, 1) - 1) % len(ips)
-	mp.logger.Debugf("Round-robin for %s: selected IP %s (index %d of %d)", 
+	idx := int(atomic.AddUint64(counter, 1)-1) % len(ips)
+	mp.logger.Debugf("Round-robin for %s: selected IP %s (index %d of %d)",
 		hostname, ips[idx].String(), idx, len(ips))
 	return []net.IP{ips[idx]}, nil
 }
@@ -138,7 +138,7 @@ func (mp *MemoryPlugin) AddEntry(hostname string, ips []net.IP) error {
 	if hostname == "" {
 		return fmt.Errorf("hostname cannot be empty")
 	}
-	
+
 	if len(ips) == 0 {
 		return fmt.Errorf("no IP addresses provided for hostname %s", hostname)
 	}
@@ -174,24 +174,24 @@ func (mp *MemoryPlugin) GetEntry(hostname string) ([]net.IP, error) {
 	if !exists {
 		return nil, fmt.Errorf("hostname %s not found", hostname)
 	}
-	
+
 	return ips, nil
 }
 
 // DeleteEntry removes a hostname entry
 func (mp *MemoryPlugin) DeleteEntry(hostname string) error {
 	hostname = strings.ToLower(hostname)
-	
+
 	mp.entriesMutex.Lock()
 	defer mp.entriesMutex.Unlock()
-	
+
 	if _, exists := mp.entries[hostname]; !exists {
 		return fmt.Errorf("hostname %s not found", hostname)
 	}
-	
+
 	delete(mp.entries, hostname)
 	delete(mp.counters, hostname)
-	
+
 	mp.logger.Infof("Deleted entry for hostname %s", hostname)
 	return nil
 }
@@ -200,11 +200,11 @@ func (mp *MemoryPlugin) DeleteEntry(hostname string) error {
 func (mp *MemoryPlugin) ListEntries() []string {
 	mp.entriesMutex.RLock()
 	defer mp.entriesMutex.RUnlock()
-	
+
 	hostnames := make([]string, 0, len(mp.entries))
 	for hostname := range mp.entries {
 		hostnames = append(hostnames, hostname)
 	}
-	
+
 	return hostnames
 }
