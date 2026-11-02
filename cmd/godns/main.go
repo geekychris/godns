@@ -22,7 +22,7 @@ var (
 	logger     *logrus.Logger
 )
 
-func init() {
+func main() {
 	// Parse command line flags
 	flag.StringVar(&configPath, "config", "config.yaml", "Path to configuration file")
 	flag.Parse()
@@ -33,9 +33,7 @@ func init() {
 		FullTimestamp:          true,
 		DisableLevelTruncation: true,
 	})
-}
 
-func main() {
 	// Load configuration
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {

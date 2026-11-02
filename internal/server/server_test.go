@@ -419,6 +419,78 @@ func TestCacheTTLBehavior(t *testing.T) {
 	assert.Nil(t, result, "Entry should have expired from cache")
 }
 
+// TestForwardQueryRespectsConfiguredTimeout is a regression test for a bug where
+// Upstream.Timeout (already a time.Duration) was multiplied by time.Second again,
+// inflating the real timeout by ~1e9x so queries to a non-responding upstream would
+// effectively never time out. It verifies forwardQuery actually bounds its wait to
+// the configured duration.
+func TestForwardQueryRespectsConfiguredTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{name: "50ms timeout", timeout: 50 * time.Millisecond},
+		{name: "200ms timeout", timeout: 200 * time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A UDP listener that never replies simulates an unresponsive upstream.
+			conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+			require.NoError(t, err)
+			defer conn.Close()
+
+			cfg := createTestConfig()
+			cfg.Upstream.Servers = []string{conn.LocalAddr().String()}
+			cfg.Upstream.Timeout = tt.timeout
+			logger := createTestLogger()
+			server := NewDNSServer(cfg, logger)
+
+			done := make(chan struct{})
+			var ips []net.IP
+			var resolveErr error
+			go func() {
+				ips, resolveErr = server.forwardQuery("example.com")
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				assert.Error(t, resolveErr)
+				assert.Nil(t, ips)
+			case <-time.After(2 * time.Second):
+				t.Fatal("forwardQuery did not return within the 2s bound; timeout is not being honored")
+			}
+		})
+	}
+}
+
+// TestResolverCount verifies ResolverCount reflects the number of distinct
+// registered resolvers and ignores duplicate-named registrations.
+func TestResolverCount(t *testing.T) {
+	cfg := createTestConfig()
+	logger := createTestLogger()
+	server := NewDNSServer(cfg, logger)
+
+	assert.Equal(t, 0, server.ResolverCount())
+
+	first := new(MockResolver)
+	first.On("Name").Return("first")
+	server.RegisterResolver(first)
+	assert.Equal(t, 1, server.ResolverCount())
+
+	second := new(MockResolver)
+	second.On("Name").Return("second")
+	server.RegisterResolver(second)
+	assert.Equal(t, 2, server.ResolverCount())
+
+	// Duplicate-named resolver should not increase the count.
+	duplicate := new(MockResolver)
+	duplicate.On("Name").Return("first")
+	server.RegisterResolver(duplicate)
+	assert.Equal(t, 2, server.ResolverCount())
+}
+
 // TestRESTAPIIntegration tests the interaction between the DNS server and REST API
 func TestRESTAPIIntegration(t *testing.T) {
 	cfg := createTestConfig()
