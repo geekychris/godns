@@ -83,12 +83,6 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("error reading config file: %v", err)
 	}
 
-	// Parse YAML into a map first for custom parsing
-	var rawConfig map[string]interface{}
-	if err := yaml.Unmarshal(data, &rawConfig); err != nil {
-		return nil, fmt.Errorf("error parsing config file: %v", err)
-	}
-
 	// Create config with defaults
 	config := CreateDefaultConfig()
 
