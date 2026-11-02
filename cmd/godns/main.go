@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	
+
 	"github.com/yourusername/godns/internal/config"
 	"github.com/yourusername/godns/internal/rest"
 	"github.com/yourusername/godns/internal/server"
@@ -22,7 +22,7 @@ var (
 	logger     *logrus.Logger
 )
 
-func init() {
+func main() {
 	// Parse command line flags
 	flag.StringVar(&configPath, "config", "config.yaml", "Path to configuration file")
 	flag.Parse()
@@ -30,12 +30,10 @@ func init() {
 	// Initialize logger
 	logger = logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp: true,
+		FullTimestamp:          true,
 		DisableLevelTruncation: true,
 	})
-}
 
-func main() {
 	// Load configuration
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
@@ -55,20 +53,20 @@ func main() {
 	}
 
 	logger.Info("Starting GoDNS server")
-	
+
 	// Create DNS server but don't start it yet
 	dnsServer := server.NewDNSServer(cfg, logger)
-	
+
 	// Initialize plugins once to get the memory plugin for REST API
 	var memoryPlugin *memory.MemoryPlugin
 	if err := registerPlugins(dnsServer, cfg, &memoryPlugin); err != nil {
 		logger.Fatalf("Failed to register plugins: %v", err)
 	}
-	
+
 	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	
+
 	// Start REST API server if enabled (before DNS server)
 	var restServer rest.Server
 	if cfg.REST.Enabled {
@@ -78,14 +76,14 @@ func main() {
 		} else {
 			logger.Debug("Memory plugin available for REST API")
 		}
-		
+
 		// Create REST server
 		restServer = rest.NewServer(cfg, logger, memoryPlugin)
 		logger.Infof("REST API server configured on %s:%d", cfg.REST.Address, cfg.REST.Port)
-		
+
 		// Set REST server in DNS server for clean shutdown
 		dnsServer.SetRESTServer(restServer)
-		
+
 		// Start REST server in a goroutine
 		restErrChan := make(chan error, 1)
 		go func() {
@@ -96,7 +94,7 @@ func main() {
 			}
 			logger.Debug("REST API server goroutine exited")
 		}()
-		
+
 		// Wait briefly to ensure REST server starts
 		select {
 		case err := <-restErrChan:
@@ -131,7 +129,7 @@ func main() {
 	if err := dnsServer.Stop(); err != nil {
 		logger.Errorf("Error stopping servers: %v", err)
 	}
-	
+
 	logger.Info("Server shutdown complete")
 }
 
@@ -139,7 +137,7 @@ func main() {
 // If memoryPluginOut is non-nil, the memory plugin will be assigned to it for use with the REST API
 func registerPlugins(dnsServer *server.DNSServer, cfg *config.Config, memoryPluginOut **memory.MemoryPlugin) error {
 	outputMode := memoryPluginOut != nil
-	
+
 	// Register file plugin if enabled
 	if cfg.Plugins.File.Enabled {
 		logger.Info("Initializing file plugin")
@@ -150,7 +148,7 @@ func registerPlugins(dnsServer *server.DNSServer, cfg *config.Config, memoryPlug
 		if err != nil {
 			return fmt.Errorf("failed to initialize file plugin: %v", err)
 		}
-		
+
 		// Register with DNS server
 		dnsServer.RegisterResolver(filePlugin)
 	}
@@ -164,10 +162,10 @@ func registerPlugins(dnsServer *server.DNSServer, cfg *config.Config, memoryPlug
 		if err != nil {
 			return fmt.Errorf("failed to initialize memory plugin: %v", err)
 		}
-		
+
 		// Register with DNS server
 		dnsServer.RegisterResolver(memoryPlugin)
-		
+
 		// Expose memory plugin for REST API if output pointer is provided
 		if outputMode {
 			// Check if memoryPlugin can be cast to *memory.MemoryPlugin

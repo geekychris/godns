@@ -364,6 +364,7 @@ func (r *CustomRoundRobinResolver) Name() string {
 func (r *CustomRoundRobinResolver) Init(config map[string]interface{}) error {
 	return nil
 }
+
 // TestCacheTTLBehavior verifies that the cache TTL is properly handled
 func TestCacheTTLBehavior(t *testing.T) {
 	// Create a server with a short cache TTL
@@ -391,7 +392,7 @@ func TestCacheTTLBehavior(t *testing.T) {
 	server.cacheMutex.RUnlock()
 
 	// Verify the TTL is close to what we set
-	assert.InDelta(t, cfg.Server.CacheTTL.Milliseconds(), ttlRemaining.Milliseconds(), 100, 
+	assert.InDelta(t, cfg.Server.CacheTTL.Milliseconds(), ttlRemaining.Milliseconds(), 100,
 		"Cache entry TTL should be close to the configured value")
 
 	// Create a DNS response and check TTL in record
@@ -399,23 +400,95 @@ func TestCacheTTLBehavior(t *testing.T) {
 	m.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
 	mockWriter := &MockResponseWriter{}
 	server.handleDNSRequest(mockWriter, m)
-	
+
 	// Verify the DNS TTL in the response header
 	resp := mockWriter.writtenMsg
 	require.NotNil(t, resp)
 	assert.Len(t, resp.Answer, 1, "Response should have one answer")
-	
+
 	aRecord, ok := resp.Answer[0].(*dns.A)
 	require.True(t, ok, "Answer should be an A record")
-	assert.Equal(t, uint32(cfg.Server.CacheTTL.Seconds()), aRecord.Hdr.Ttl, 
+	assert.Equal(t, uint32(cfg.Server.CacheTTL.Seconds()), aRecord.Hdr.Ttl,
 		"TTL in DNS response should match config")
 
 	// Wait for the cache to expire
 	time.Sleep(cfg.Server.CacheTTL + 100*time.Millisecond)
-	
+
 	// Verify entry is no longer in cache
 	result = server.resolveFromCache(hostname)
 	assert.Nil(t, result, "Entry should have expired from cache")
+}
+
+// TestForwardQueryRespectsConfiguredTimeout is a regression test for a bug where
+// Upstream.Timeout (already a time.Duration) was multiplied by time.Second again,
+// inflating the real timeout by ~1e9x so queries to a non-responding upstream would
+// effectively never time out. It verifies forwardQuery actually bounds its wait to
+// the configured duration.
+func TestForwardQueryRespectsConfiguredTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{name: "50ms timeout", timeout: 50 * time.Millisecond},
+		{name: "200ms timeout", timeout: 200 * time.Millisecond},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A UDP listener that never replies simulates an unresponsive upstream.
+			conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+			require.NoError(t, err)
+			defer conn.Close()
+
+			cfg := createTestConfig()
+			cfg.Upstream.Servers = []string{conn.LocalAddr().String()}
+			cfg.Upstream.Timeout = tt.timeout
+			logger := createTestLogger()
+			server := NewDNSServer(cfg, logger)
+
+			done := make(chan struct{})
+			var ips []net.IP
+			var resolveErr error
+			go func() {
+				ips, resolveErr = server.forwardQuery("example.com")
+				close(done)
+			}()
+
+			select {
+			case <-done:
+				assert.Error(t, resolveErr)
+				assert.Nil(t, ips)
+			case <-time.After(2 * time.Second):
+				t.Fatal("forwardQuery did not return within the 2s bound; timeout is not being honored")
+			}
+		})
+	}
+}
+
+// TestResolverCount verifies ResolverCount reflects the number of distinct
+// registered resolvers and ignores duplicate-named registrations.
+func TestResolverCount(t *testing.T) {
+	cfg := createTestConfig()
+	logger := createTestLogger()
+	server := NewDNSServer(cfg, logger)
+
+	assert.Equal(t, 0, server.ResolverCount())
+
+	first := new(MockResolver)
+	first.On("Name").Return("first")
+	server.RegisterResolver(first)
+	assert.Equal(t, 1, server.ResolverCount())
+
+	second := new(MockResolver)
+	second.On("Name").Return("second")
+	server.RegisterResolver(second)
+	assert.Equal(t, 2, server.ResolverCount())
+
+	// Duplicate-named resolver should not increase the count.
+	duplicate := new(MockResolver)
+	duplicate.On("Name").Return("first")
+	server.RegisterResolver(duplicate)
+	assert.Equal(t, 2, server.ResolverCount())
 }
 
 // TestRESTAPIIntegration tests the interaction between the DNS server and REST API
@@ -423,21 +496,21 @@ func TestRESTAPIIntegration(t *testing.T) {
 	cfg := createTestConfig()
 	logger := createTestLogger()
 	server := NewDNSServer(cfg, logger)
-	
+
 	// Create a mock REST server
 	mockRESTServer := new(MockRESTServer)
 	mockRESTServer.On("Stop").Return(nil)
-	
+
 	// Set the REST server
 	server.SetRESTServer(mockRESTServer)
-	
+
 	// Verify the REST server was set
 	assert.Equal(t, mockRESTServer, server.restServer)
-	
+
 	// Test clean server shutdown with REST server
 	err := server.Stop()
 	assert.NoError(t, err, "Server shutdown should succeed")
-	
+
 	// Verify that the REST server's Stop method was called
 	mockRESTServer.AssertExpectations(t)
 }

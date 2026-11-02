@@ -47,7 +47,7 @@ type FilePluginConfig struct {
 
 // MemoryPluginConfig contains configuration for the in-memory plugin
 type MemoryPluginConfig struct {
-	Enabled bool                   `yaml:"enabled"`
+	Enabled bool                     `yaml:"enabled"`
 	Entries []map[string]interface{} `yaml:"entries"`
 }
 
@@ -107,7 +107,7 @@ func LoadConfig(path string) (*Config, error) {
 			config.Server.CacheTTL = ttl
 		}
 	}
-	
+
 	// Parse upstream timeout
 	if upstreamCfg, ok := rawConfig["upstream"].(map[string]interface{}); ok {
 		if timeoutStr, ok := upstreamCfg["timeout"].(string); ok {
@@ -118,7 +118,7 @@ func LoadConfig(path string) (*Config, error) {
 			config.Upstream.Timeout = timeout
 		}
 	}
-	
+
 	// Parse file plugin refresh interval
 	if pluginsCfg, ok := rawConfig["plugins"].(map[string]interface{}); ok {
 		if fileCfg, ok := pluginsCfg["file"].(map[string]interface{}); ok {
@@ -145,7 +145,7 @@ func applyDefaults(config *Config) {
 		config.Server.Port = 53
 	}
 	if config.Server.CacheTTL == 0 {
-		config.Server.CacheTTL = 3600 // 1 hour in seconds
+		config.Server.CacheTTL = time.Hour
 	}
 
 	// Upstream defaults
@@ -153,7 +153,7 @@ func applyDefaults(config *Config) {
 		config.Upstream.Servers = []string{"8.8.8.8:53", "1.1.1.1:53"}
 	}
 	if config.Upstream.Timeout == 0 {
-		config.Upstream.Timeout = 5 // 5 seconds
+		config.Upstream.Timeout = 5 * time.Second
 	}
 
 	// REST API defaults

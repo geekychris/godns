@@ -360,10 +360,10 @@ func TestExplicitIPConversion(t *testing.T) {
 	ipString := ips[0].String()
 	parsedIP := net.ParseIP(ipString)
 	require.NotNil(t, parsedIP)
-	
+
 	// Check that it matches the original
 	assert.Equal(t, ips[0].String(), parsedIP.String())
-	
+
 	// Test that IP comparison works
 	expectedIP := net.ParseIP("192.168.1.1")
 	assert.True(t, ips[0].Equal(expectedIP))

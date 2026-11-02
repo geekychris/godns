@@ -2,13 +2,13 @@ package server
 
 import (
 	"fmt"
-	"net"
-	"testing"
-	"time"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yourusername/godns/internal/config"
+	"net"
+	"testing"
+	"time"
 )
 
 // getTestAddr returns a free port for testing
@@ -193,13 +193,13 @@ func TestCacheAndRoundRobin(t *testing.T) {
 	serverAddr := fmt.Sprintf("%s:%d", addr, port)
 	err := waitForServer(serverAddr)
 	require.NoError(t, err, "Server failed to start")
-	
+
 	// Add an additional delay to ensure the server is fully initialized
 	time.Sleep(500 * time.Millisecond)
 	// Create DNS client
 	c := new(dns.Client)
 	hostname := "roundrobin.example.com"
-	
+
 	// First query - should get first IP and cache it
 	m1 := new(dns.Msg)
 	m1.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
@@ -211,7 +211,7 @@ func TestCacheAndRoundRobin(t *testing.T) {
 	require.True(t, ok)
 	firstIP := a1.A.String()
 	require.Contains(t, []string{"192.168.1.10", "192.168.1.20", "192.168.1.30"}, firstIP)
-	
+
 	// Second query - should get cached result (same IP)
 	m2 := new(dns.Msg)
 	m2.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
@@ -222,10 +222,10 @@ func TestCacheAndRoundRobin(t *testing.T) {
 	a2, ok := r2.Answer[0].(*dns.A)
 	require.True(t, ok)
 	assert.Equal(t, firstIP, a2.A.String(), "Cached result should match first query")
-	
+
 	// Wait for cache to expire
 	time.Sleep(cfg.Server.CacheTTL + 100*time.Millisecond)
-	
+
 	// Third query - should get next IP in round-robin and cache it
 	m3 := new(dns.Msg)
 	m3.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
@@ -238,7 +238,7 @@ func TestCacheAndRoundRobin(t *testing.T) {
 	secondIP := a3.A.String()
 	require.Contains(t, []string{"192.168.1.10", "192.168.1.20", "192.168.1.30"}, secondIP)
 	require.NotEqual(t, firstIP, secondIP, "Round-robin should return different IP")
-	
+
 	// Fourth query - should get cached result (same as third query)
 	m4 := new(dns.Msg)
 	m4.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
@@ -249,10 +249,10 @@ func TestCacheAndRoundRobin(t *testing.T) {
 	a4, ok := r4.Answer[0].(*dns.A)
 	require.True(t, ok)
 	assert.Equal(t, secondIP, a4.A.String(), "Cached result should match third query")
-	
+
 	// Wait for cache to expire again
 	time.Sleep(cfg.Server.CacheTTL + 100*time.Millisecond)
-	
+
 	// Fifth query - should get third IP and cache it
 	m5 := new(dns.Msg)
 	m5.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
@@ -266,10 +266,10 @@ func TestCacheAndRoundRobin(t *testing.T) {
 	require.Contains(t, []string{"192.168.1.10", "192.168.1.20", "192.168.1.30"}, thirdIP)
 	require.NotEqual(t, firstIP, thirdIP, "Third IP should be different from first")
 	require.NotEqual(t, secondIP, thirdIP, "Third IP should be different from second")
-	
+
 	// Wait for cache to expire once more
 	time.Sleep(cfg.Server.CacheTTL + 100*time.Millisecond)
-	
+
 	// Sixth query - should cycle back to first IP
 	m6 := new(dns.Msg)
 	m6.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
@@ -330,64 +330,64 @@ func TestConcurrentQueries(t *testing.T) {
 	// Run concurrent queries
 	const numConcurrent = 10
 	const numQueries = 3
-	
+
 	hostnames := []string{
 		"host1.example.com",
 		"host2.example.com",
 		"host3.example.com",
 	}
-	
+
 	expectedIPs := map[string]string{
 		"host1.example.com": "192.168.1.1",
 		"host2.example.com": "192.168.1.2",
 		"host3.example.com": "192.168.1.3",
 	}
-	
+
 	results := make(chan error, numConcurrent*numQueries)
-	
+
 	for i := 0; i < numConcurrent; i++ {
 		go func(id int) {
 			c := new(dns.Client)
-			
+
 			for j := 0; j < numQueries; j++ {
 				hostname := hostnames[j%len(hostnames)]
-				
+
 				m := new(dns.Msg)
 				m.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
-				
+
 				r, _, err := c.Exchange(m, server.Addr())
 				if err != nil {
 					results <- err
 					continue
 				}
-				
+
 				if r.Rcode != dns.RcodeSuccess {
 					results <- fmt.Errorf("expected success, got code %d", r.Rcode)
 					continue
 				}
-				
+
 				if len(r.Answer) != 1 {
 					results <- fmt.Errorf("expected 1 answer, got %d", len(r.Answer))
 					continue
 				}
-				
+
 				a, ok := r.Answer[0].(*dns.A)
 				if !ok {
 					results <- fmt.Errorf("expected A record, got %T", r.Answer[0])
 					continue
 				}
-				
+
 				if a.A.String() != expectedIPs[hostname] {
 					results <- fmt.Errorf("expected IP %s, got %s", expectedIPs[hostname], a.A.String())
 					continue
 				}
-				
+
 				// Query succeeded
 				results <- nil
 			}
 		}(i)
 	}
-	
+
 	// Collect and check results
 	var failures int
 	for i := 0; i < numConcurrent*numQueries; i++ {
@@ -396,7 +396,7 @@ func TestConcurrentQueries(t *testing.T) {
 			t.Logf("Query failed: %v", err)
 		}
 	}
-	
+
 	assert.Zero(t, failures, "Expected no failures in concurrent queries")
 
 	// Clean up
@@ -477,11 +477,11 @@ func TestMultipleResolvers(t *testing.T) {
 			"host2.example.com": {net.ParseIP("192.168.2.1")},
 		},
 	}
-	
+
 	// Give it a custom name to avoid duplicate registration
 	customResolver2 := &customNameResolver{
 		CustomMultiHostResolver: resolver2,
-		customName: "custom-multi-host-2",
+		customName:              "custom-multi-host-2",
 	}
 	server.RegisterResolver(customResolver2)
 	server.RegisterResolver(customResolver2)
