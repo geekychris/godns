@@ -92,44 +92,11 @@ func LoadConfig(path string) (*Config, error) {
 	// Create config with defaults
 	config := CreateDefaultConfig()
 
-	// Parse the YAML into the config struct
+	// Parse the YAML into the config struct. yaml.v3 unmarshals
+	// time.Duration fields directly from duration strings (e.g. "10s"),
+	// so no separate duration-parsing pass is needed.
 	if err := yaml.Unmarshal(data, config); err != nil {
 		return nil, fmt.Errorf("error parsing config file: %v", err)
-	}
-
-	// Parse duration strings
-	if serverCfg, ok := rawConfig["server"].(map[string]interface{}); ok {
-		if cacheTTLStr, ok := serverCfg["cache_ttl"].(string); ok {
-			ttl, err := time.ParseDuration(cacheTTLStr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid cache_ttl duration: %v", err)
-			}
-			config.Server.CacheTTL = ttl
-		}
-	}
-
-	// Parse upstream timeout
-	if upstreamCfg, ok := rawConfig["upstream"].(map[string]interface{}); ok {
-		if timeoutStr, ok := upstreamCfg["timeout"].(string); ok {
-			timeout, err := time.ParseDuration(timeoutStr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid upstream timeout duration: %v", err)
-			}
-			config.Upstream.Timeout = timeout
-		}
-	}
-
-	// Parse file plugin refresh interval
-	if pluginsCfg, ok := rawConfig["plugins"].(map[string]interface{}); ok {
-		if fileCfg, ok := pluginsCfg["file"].(map[string]interface{}); ok {
-			if refreshStr, ok := fileCfg["refresh_interval"].(string); ok {
-				refresh, err := time.ParseDuration(refreshStr)
-				if err != nil {
-					return nil, fmt.Errorf("invalid file plugin refresh_interval duration: %v", err)
-				}
-				config.Plugins.File.RefreshInterval = refresh
-			}
-		}
 	}
 
 	return config, nil
