@@ -72,6 +72,14 @@ func (s *DNSServer) RegisterResolver(resolver api.Resolver) {
 	s.logger.Infof("Registered resolver: %s", resolver.Name())
 }
 
+// ResolverCount returns the number of resolvers currently registered
+func (s *DNSServer) ResolverCount() int {
+	s.resolverLock.RLock()
+	defer s.resolverLock.RUnlock()
+
+	return len(s.resolvers)
+}
+
 // SetRESTServer sets the REST API server
 func (s *DNSServer) SetRESTServer(server rest.Server) {
 	s.restServer = server
@@ -315,7 +323,7 @@ func (s *DNSServer) forwardQuery(hostname string) ([]net.IP, error) {
 
 	for _, server := range s.config.Upstream.Servers {
 		c := &dns.Client{
-			Timeout: s.config.Upstream.Timeout * time.Second,
+			Timeout: s.config.Upstream.Timeout,
 		}
 		r, _, err := c.Exchange(m, server)
 		if err != nil {
@@ -352,7 +360,7 @@ func (s *DNSServer) forwardQueryRaw(r *dns.Msg) (*dns.Msg, error) {
 
 	for _, server := range s.config.Upstream.Servers {
 		c := &dns.Client{
-			Timeout: s.config.Upstream.Timeout * time.Second,
+			Timeout: s.config.Upstream.Timeout,
 		}
 		resp, _, err := c.Exchange(r, server)
 		if err != nil {

@@ -145,7 +145,7 @@ func applyDefaults(config *Config) {
 		config.Server.Port = 53
 	}
 	if config.Server.CacheTTL == 0 {
-		config.Server.CacheTTL = 3600 // 1 hour in seconds
+		config.Server.CacheTTL = time.Hour
 	}
 
 	// Upstream defaults
@@ -153,7 +153,7 @@ func applyDefaults(config *Config) {
 		config.Upstream.Servers = []string{"8.8.8.8:53", "1.1.1.1:53"}
 	}
 	if config.Upstream.Timeout == 0 {
-		config.Upstream.Timeout = 5 // 5 seconds
+		config.Upstream.Timeout = 5 * time.Second
 	}
 
 	// REST API defaults
