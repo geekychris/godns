@@ -228,6 +228,14 @@ logging:
   format: "text" # text or json
 ```
 
+### DNSSEC (optional)
+
+GoDNS can sign authoritative answers and validate DNSSEC signatures on
+upstream responses. Both are opt-in via a `dnssec:` config section and off
+by default; see [docs/dnssec.md](docs/dnssec.md) and
+[examples/dnssec-config.yaml](examples/dnssec-config.yaml) for key
+generation, config wiring, and rotation.
+
 ## Extending the System
 
 ### Creating a New Plugin

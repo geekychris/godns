@@ -1,0 +1,48 @@
+# Example configuration showing DNSSEC signing and validation.
+# See docs/dnssec.md for key generation and rotation instructions.
+
+server:
+  address: "0.0.0.0"
+  port: 53
+  cache_ttl: "1h"
+
+upstream:
+  servers:
+    - "8.8.8.8:53"
+    - "1.1.1.1:53"
+  timeout: "5s"
+
+plugins:
+  memory:
+    enabled: true
+    entries:
+      - hostname: "www.example.com"
+        ips: ["192.0.2.10"]
+
+rest:
+  enabled: false
+
+logging:
+  level: "info"
+  format: "text"
+
+dnssec:
+  # Signs authoritative answers (cache hits and plugin-resolved A records)
+  # for the configured zone, and serves the zone's DNSKEY on a DNSKEY
+  # query. key_file is a path prefix: key_file+".key" holds the public
+  # DNSKEY RR and key_file+".private" holds the private key, both written
+  # by `godns-keygen -zone example.com -out /etc/godns/keys/Kexample.com`.
+  signing:
+    enabled: true
+    zone: "example.com"
+    key_file: "/etc/godns/keys/Kexample.com"
+    signature_ttl: "1h"
+
+  # Validates RRSIGs on responses forwarded from upstream servers against a
+  # locally pinned set of trusted DNSKEYs (no DS/chain-of-trust lookups).
+  # Responses with a missing or invalid signature are rejected with
+  # SERVFAIL instead of being passed through.
+  validation:
+    enabled: true
+    trusted_key_files:
+      - "/etc/godns/keys/Kexample.com.key"
