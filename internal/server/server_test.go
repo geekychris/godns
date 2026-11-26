@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/yourusername/godns/internal/config"
 	"github.com/yourusername/godns/internal/metrics"
+	"github.com/yourusername/godns/plugins/dnssec"
 )
 
 // MockResolver is a mock implementation of the Resolver interface
@@ -717,4 +719,276 @@ func findMetric(t *testing.T, reg *prometheus.Registry, metricName, labelName, l
 		}
 	}
 	return nil
+}
+
+// startFakeUpstream starts a UDP DNS server on loopback with the given
+// handler and returns its address. It is shut down automatically at the
+// end of the test.
+func startFakeUpstream(t *testing.T, handler dns.HandlerFunc) string {
+	t.Helper()
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	srv := &dns.Server{PacketConn: pc, Handler: handler}
+	go func() {
+		_ = srv.ActivateAndServe()
+	}()
+	t.Cleanup(func() {
+		_ = srv.Shutdown()
+	})
+
+	return pc.LocalAddr().String()
+}
+
+// TestHandleDNSRequest_DNSSECSigning verifies that plugin-resolved A
+// answers are signed when a matching Signer is configured, and are left
+// unsigned (today's behavior) when no signer is configured.
+func TestHandleDNSRequest_DNSSECSigning(t *testing.T) {
+	key, priv, err := dnssec.GenerateKey("example.com", dns.ECDSAP256SHA256, 256)
+	require.NoError(t, err)
+	signer, err := dnssec.NewSigner("example.com", key, priv, time.Hour)
+	require.NoError(t, err)
+
+	hostname := "www.example.com"
+	expectedIP := net.ParseIP("192.168.1.1")
+
+	tests := []struct {
+		name       string
+		withSigner bool
+	}{
+		{name: "matching signer configured signs the answer", withSigner: true},
+		{name: "no signer configured leaves the answer unsigned", withSigner: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := createTestConfig()
+			logger := createTestLogger()
+			srv := NewDNSServer(cfg, logger)
+
+			mockResolver := new(MockResolver)
+			mockResolver.On("Name").Return("mock")
+			mockResolver.On("CanResolve", hostname).Return(true)
+			mockResolver.On("Resolve", hostname).Return([]net.IP{expectedIP}, nil)
+			srv.RegisterResolver(mockResolver)
+
+			if tt.withSigner {
+				srv.SetSigner(signer)
+			}
+
+			m := new(dns.Msg)
+			m.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
+			w := &MockResponseWriter{}
+			srv.handleDNSRequest(w, m)
+
+			resp := w.writtenMsg
+			require.NotNil(t, resp)
+			assert.Equal(t, dns.RcodeSuccess, resp.Rcode)
+
+			var aRRs []dns.RR
+			var sigRR *dns.RRSIG
+			for _, rr := range resp.Answer {
+				switch rec := rr.(type) {
+				case *dns.A:
+					aRRs = append(aRRs, rec)
+					assert.Equal(t, expectedIP.String(), rec.A.String())
+				case *dns.RRSIG:
+					sigRR = rec
+				}
+			}
+			require.Len(t, aRRs, 1)
+
+			if tt.withSigner {
+				require.NotNil(t, sigRR, "expected an RRSIG alongside the A record")
+				assert.Equal(t, dns.TypeA, sigRR.TypeCovered)
+				assert.NoError(t, sigRR.Verify(signer.DNSKEY(), aRRs))
+			} else {
+				assert.Nil(t, sigRR, "expected no RRSIG when no signer is configured")
+			}
+		})
+	}
+}
+
+// TestHandleDNSRequest_DNSKEYQuery verifies that a DNSKEY query for the
+// signer's zone returns the zone's DNSKEY plus a self-signed RRSIG.
+func TestHandleDNSRequest_DNSKEYQuery(t *testing.T) {
+	key, priv, err := dnssec.GenerateKey("example.com", dns.ECDSAP256SHA256, 256)
+	require.NoError(t, err)
+	signer, err := dnssec.NewSigner("example.com", key, priv, time.Hour)
+	require.NoError(t, err)
+
+	cfg := createTestConfig()
+	logger := createTestLogger()
+	srv := NewDNSServer(cfg, logger)
+	srv.SetSigner(signer)
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("example.com"), dns.TypeDNSKEY)
+	w := &MockResponseWriter{}
+	srv.handleDNSRequest(w, m)
+
+	resp := w.writtenMsg
+	require.NotNil(t, resp)
+	assert.Equal(t, dns.RcodeSuccess, resp.Rcode)
+
+	var dnskeyRR *dns.DNSKEY
+	var sigRR *dns.RRSIG
+	for _, rr := range resp.Answer {
+		switch rec := rr.(type) {
+		case *dns.DNSKEY:
+			dnskeyRR = rec
+		case *dns.RRSIG:
+			sigRR = rec
+		}
+	}
+
+	require.NotNil(t, dnskeyRR)
+	require.NotNil(t, sigRR)
+	assert.Equal(t, dns.TypeDNSKEY, sigRR.TypeCovered)
+	assert.NoError(t, sigRR.Verify(dnskeyRR, []dns.RR{dnskeyRR}))
+}
+
+// TestForwardQuery_DNSSECValidation drives forwardQuery against a fake
+// upstream server, covering disabled passthrough, valid-signature
+// acceptance, and rejection of tampered or missing signatures.
+func TestForwardQuery_DNSSECValidation(t *testing.T) {
+	key, priv, err := dnssec.GenerateKey("example.com", dns.ECDSAP256SHA256, 256)
+	require.NoError(t, err)
+	signer, err := dnssec.NewSigner("example.com", key, priv, time.Hour)
+	require.NoError(t, err)
+	validator, err := dnssec.NewValidator([]*dns.DNSKEY{key})
+	require.NoError(t, err)
+
+	hostname := "upstream.example.com"
+	ip := net.ParseIP("203.0.113.5")
+
+	buildAnswer := func() *dns.A {
+		return &dns.A{
+			Hdr: dns.RR_Header{Name: dns.Fqdn(hostname), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   ip,
+		}
+	}
+
+	tests := []struct {
+		name          string
+		withValidator bool
+		handler       func(w dns.ResponseWriter, req *dns.Msg)
+		wantErr       bool
+	}{
+		{
+			name:          "validation disabled, unsigned upstream answer passes through",
+			withValidator: false,
+			handler: func(w dns.ResponseWriter, req *dns.Msg) {
+				m := new(dns.Msg)
+				m.SetReply(req)
+				m.Answer = []dns.RR{buildAnswer()}
+				_ = w.WriteMsg(m)
+			},
+		},
+		{
+			name:          "validation enabled, correctly signed answer succeeds",
+			withValidator: true,
+			handler: func(w dns.ResponseWriter, req *dns.Msg) {
+				m := new(dns.Msg)
+				m.SetReply(req)
+				a := buildAnswer()
+				sig, err := signer.SignRRset([]dns.RR{a})
+				require.NoError(t, err)
+				m.Answer = []dns.RR{a, sig}
+				_ = w.WriteMsg(m)
+			},
+		},
+		{
+			name:          "validation enabled, tampered answer is rejected",
+			withValidator: true,
+			handler: func(w dns.ResponseWriter, req *dns.Msg) {
+				m := new(dns.Msg)
+				m.SetReply(req)
+				a := buildAnswer()
+				sig, err := signer.SignRRset([]dns.RR{a})
+				require.NoError(t, err)
+				tampered := buildAnswer()
+				tampered.A = net.ParseIP("203.0.113.66")
+				m.Answer = []dns.RR{tampered, sig}
+				_ = w.WriteMsg(m)
+			},
+			wantErr: true,
+		},
+		{
+			name:          "validation enabled, missing RRSIG is rejected",
+			withValidator: true,
+			handler: func(w dns.ResponseWriter, req *dns.Msg) {
+				m := new(dns.Msg)
+				m.SetReply(req)
+				m.Answer = []dns.RR{buildAnswer()}
+				_ = w.WriteMsg(m)
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr := startFakeUpstream(t, dns.HandlerFunc(tt.handler))
+
+			cfg := createTestConfig()
+			cfg.Upstream.Servers = []string{addr}
+			logger := createTestLogger()
+			srv := NewDNSServer(cfg, logger)
+			if tt.withValidator {
+				srv.SetValidator(validator)
+			}
+
+			ips, err := srv.forwardQuery(hostname)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, dnssec.ErrValidationFailed))
+				assert.Nil(t, ips)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Len(t, ips, 1)
+			assert.Equal(t, ip.String(), ips[0].String())
+		})
+	}
+}
+
+// TestHandleDNSRequest_SERVFAILOnValidationFailure is an end-to-end check
+// that a validation failure on the upstream fallback path surfaces as
+// SERVFAIL, not NXDOMAIN.
+func TestHandleDNSRequest_SERVFAILOnValidationFailure(t *testing.T) {
+	key, _, err := dnssec.GenerateKey("example.com", dns.ECDSAP256SHA256, 256)
+	require.NoError(t, err)
+	validator, err := dnssec.NewValidator([]*dns.DNSKEY{key})
+	require.NoError(t, err)
+
+	hostname := "unsigned.example.com"
+	addr := startFakeUpstream(t, dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(req)
+		m.Answer = []dns.RR{&dns.A{
+			Hdr: dns.RR_Header{Name: dns.Fqdn(hostname), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+			A:   net.ParseIP("203.0.113.9"),
+		}}
+		_ = w.WriteMsg(m)
+	}))
+
+	cfg := createTestConfig()
+	cfg.Upstream.Servers = []string{addr}
+	logger := createTestLogger()
+	srv := NewDNSServer(cfg, logger)
+	srv.SetValidator(validator)
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
+	w := &MockResponseWriter{}
+	srv.handleDNSRequest(w, m)
+
+	resp := w.writtenMsg
+	require.NotNil(t, resp)
+	assert.Equal(t, dns.RcodeServerFailure, resp.Rcode)
+	assert.NotEqual(t, dns.RcodeNameError, resp.Rcode)
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/yourusername/godns/internal/metrics"
 	"github.com/yourusername/godns/internal/rest"
 	"github.com/yourusername/godns/pkg/api"
+	"github.com/yourusername/godns/plugins/dnssec"
 )
 
 // DNSServer represents the DNS server
@@ -27,6 +29,8 @@ type DNSServer struct {
 	logger       *logrus.Logger
 	metrics      *metrics.Metrics
 	restServer   rest.Server
+	signer       *dnssec.Signer
+	validator    *dnssec.Validator
 }
 
 // cacheEntry represents a cached DNS response
@@ -82,6 +86,41 @@ func (s *DNSServer) SetRESTServer(server rest.Server) {
 	s.logger.Debug("REST server connected to DNS server")
 }
 
+// SetSigner enables DNSSEC signing of authoritative answers using signer.
+// Passing nil disables signing (the default).
+func (s *DNSServer) SetSigner(signer *dnssec.Signer) {
+	s.signer = signer
+	if signer != nil {
+		s.logger.Infof("DNSSEC signing enabled for zone %s", signer.Zone())
+	}
+}
+
+// SetValidator enables DNSSEC validation of upstream responses using
+// validator. Passing nil disables validation (the default).
+func (s *DNSServer) SetValidator(validator *dnssec.Validator) {
+	s.validator = validator
+	if validator != nil {
+		s.logger.Info("DNSSEC validation of upstream responses enabled")
+	}
+}
+
+// signRRset appends an RRSIG to rrset if s.signer is configured and the
+// RRset's owner name falls within the signer's zone. Signing failures are
+// logged but do not affect the (unsigned) RRset returned to the caller.
+func (s *DNSServer) signRRset(rrset []dns.RR) []dns.RR {
+	if s.signer == nil || len(rrset) == 0 || !s.signer.MatchesZone(rrset[0].Header().Name) {
+		return rrset
+	}
+
+	sig, err := s.signer.SignRRset(rrset)
+	if err != nil {
+		s.logger.Warnf("Failed to sign RRset for %s: %v", rrset[0].Header().Name, err)
+		return rrset
+	}
+
+	return append(rrset, sig)
+}
+
 // Start starts the DNS server
 func (s *DNSServer) Start() error {
 	// Set up the DNS server
@@ -130,11 +169,12 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 	m.SetReply(r)
 	m.Authoritative = true
 
+questionLoop:
 	for _, q := range r.Question {
 		s.logger.Debugf("Received query for %s (type: %d)", q.Name, q.Qtype)
 
-		// Only handle A record queries for now
-		if q.Qtype == dns.TypeA {
+		switch {
+		case q.Qtype == dns.TypeA:
 			start := time.Now()
 			hostname := q.Name
 			// Remove trailing dot from hostname if present
@@ -147,8 +187,9 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 			// Try to resolve using cache first
 			if ips := s.resolveFromCache(hostname); ips != nil {
 				s.logger.Debugf("Cache hit for %s", hostname)
+				var rrset []dns.RR
 				for _, ip := range ips {
-					rr := &dns.A{
+					rrset = append(rrset, &dns.A{
 						Hdr: dns.RR_Header{
 							Name:   q.Name,
 							Rrtype: dns.TypeA,
@@ -156,9 +197,9 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 							Ttl:    uint32(s.config.Server.CacheTTL.Seconds()),
 						},
 						A: ip,
-					}
-					m.Answer = append(m.Answer, rr)
+					})
 				}
+				m.Answer = append(m.Answer, s.signRRset(rrset)...)
 
 				s.metrics.IncCacheHit()
 				s.metrics.ObserveQueryLatency(metrics.StrategyCache, time.Since(start))
@@ -170,6 +211,7 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 
 			// Try to resolve using plugins
 			resolved := false
+			validationFailed := false
 			ips, err := s.resolveWithPlugins(hostname)
 			if err == nil && len(ips) > 0 {
 				s.logger.Debugf("Resolved %s using plugins: %v", hostname, ips)
@@ -177,8 +219,9 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 				// Cache the result
 				s.cacheResult(hostname, ips)
 
+				var rrset []dns.RR
 				for _, ip := range ips {
-					rr := &dns.A{
+					rrset = append(rrset, &dns.A{
 						Hdr: dns.RR_Header{
 							Name:   q.Name,
 							Rrtype: dns.TypeA,
@@ -186,16 +229,18 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 							Ttl:    uint32(s.config.Server.CacheTTL.Seconds()),
 						},
 						A: ip,
-					}
-					m.Answer = append(m.Answer, rr)
+					})
 				}
+				m.Answer = append(m.Answer, s.signRRset(rrset)...)
 
 				s.metrics.ObserveQueryLatency(metrics.StrategyPlugin, time.Since(start))
 
 				resolved = true
 			}
 
-			// Fall back to upstream DNS server if plugins couldn't resolve
+			// Fall back to upstream DNS server if plugins couldn't resolve.
+			// Forwarded answers are never signed: godns has no authority
+			// over data it fetched from elsewhere.
 			if !resolved {
 				ips, err := s.forwardQuery(hostname)
 				if err == nil && len(ips) > 0 {
@@ -220,10 +265,18 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 					s.metrics.ObserveQueryLatency(metrics.StrategyUpstream, time.Since(start))
 
 					resolved = true
+				} else if errors.Is(err, dnssec.ErrValidationFailed) {
+					validationFailed = true
 				}
 			}
 
-			if !resolved {
+			switch {
+			case validationFailed:
+				s.logger.Warnf("DNSSEC validation failed for upstream response for %s", hostname)
+				m.SetRcode(r, dns.RcodeServerFailure)
+
+				s.metrics.ObserveQueryLatency(metrics.StrategyFailed, time.Since(start))
+			case !resolved:
 				s.logger.Warnf("Failed to resolve %s", hostname)
 
 				// Set NXDOMAIN (Name Error) response code for unresolvable hostnames
@@ -231,15 +284,21 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 
 				s.metrics.ObserveQueryLatency(metrics.StrategyFailed, time.Since(start))
 			}
-		} else {
-			// For non-A record types, forward directly to upstream
+
+		case q.Qtype == dns.TypeDNSKEY && s.signer != nil && s.signer.MatchesZone(q.Name):
+			dnskey := s.signer.DNSKEY()
+			rrset := s.signRRset([]dns.RR{dnskey})
+			m.Answer = append(m.Answer, rrset...)
+
+		default:
+			// For all other record types, forward directly to upstream
 			response, err := s.forwardQueryRaw(r)
 			if err == nil {
 				// Replace our empty reply with the forwarded response
 				*m = *response
-				break // We've replaced the entire message, so we're done
+				break questionLoop // We've replaced the entire message, so we're done
 			} else {
-				s.logger.Warnf("Failed to forward non-A query: %v", err)
+				s.logger.Warnf("Failed to forward query: %v", err)
 
 				// For non-A records, the response should be NOERROR even if we don't have records
 				// This indicates the domain exists but we don't have that record type
@@ -309,6 +368,11 @@ func (s *DNSServer) forwardQuery(hostname string) ([]net.IP, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
 	m.RecursionDesired = true
+	if s.validator != nil {
+		// Request DNSSEC records via the EDNS0 DO bit so the upstream
+		// response includes the RRSIGs we need to validate.
+		m.SetEdns0(4096, true)
+	}
 
 	var ips []net.IP
 	var lastErr error
@@ -327,6 +391,13 @@ func (s *DNSServer) forwardQuery(hostname string) ([]net.IP, error) {
 		if r.Rcode != dns.RcodeSuccess {
 			s.logger.Warnf("Upstream DNS %s returned non-success code: %d", server, r.Rcode)
 			continue
+		}
+
+		if s.validator != nil {
+			if err := s.validator.ValidateMsg(r); err != nil {
+				s.logger.Warnf("DNSSEC validation failed for upstream response from %s for %s: %v", server, hostname, err)
+				return nil, err
+			}
 		}
 
 		for _, answer := range r.Answer {
