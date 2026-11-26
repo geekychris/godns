@@ -235,14 +235,75 @@ func TestSaveConfig_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 
-	// Memory.Entries round-trips as an empty (non-nil) slice rather than nil,
-	// which is an irrelevant YAML marshaling detail, so compare it separately.
+	// Memory.Entries and DNSSEC.Validation.TrustedKeyFiles round-trip as
+	// empty (non-nil) slices rather than nil, which is an irrelevant YAML
+	// marshaling detail, so compare them separately.
 	assert.Empty(t, loaded.Plugins.Memory.Entries)
 	loaded.Plugins.Memory.Entries = cfg.Plugins.Memory.Entries
+	assert.Empty(t, loaded.DNSSEC.Validation.TrustedKeyFiles)
+	loaded.DNSSEC.Validation.TrustedKeyFiles = cfg.DNSSEC.Validation.TrustedKeyFiles
 
 	assert.Equal(t, cfg, loaded)
 	assert.Equal(t, cfg.Server.CacheTTL, loaded.Server.CacheTTL)
 	assert.Equal(t, cfg.Upstream.Timeout, loaded.Upstream.Timeout)
+}
+
+func TestLoadConfig_DNSSECDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("server:\n  port: 1053\n"), 0644))
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	assert.False(t, cfg.DNSSEC.Signing.Enabled)
+	assert.False(t, cfg.DNSSEC.Validation.Enabled)
+	assert.Equal(t, time.Hour, cfg.DNSSEC.Signing.SignatureTTL)
+}
+
+func TestLoadConfig_DNSSECSignatureTTLParsing(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+		want    time.Duration
+	}{
+		{
+			name: "30m parses exactly",
+			yaml: "dnssec:\n  signing:\n    enabled: true\n    signature_ttl: \"30m\"\n",
+			want: 30 * time.Minute,
+		},
+		{
+			name: "2h parses exactly",
+			yaml: "dnssec:\n  signing:\n    enabled: true\n    signature_ttl: \"2h\"\n",
+			want: 2 * time.Hour,
+		},
+		{
+			name:    "invalid duration string errors",
+			yaml:    "dnssec:\n  signing:\n    signature_ttl: \"notaduration\"\n",
+			wantErr: "error parsing config file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tt.yaml), 0644))
+
+			cfg, err := LoadConfig(path)
+
+			if tt.wantErr != "" {
+				assert.Nil(t, cfg)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+			assert.Equal(t, tt.want, cfg.DNSSEC.Signing.SignatureTTL)
+		})
+	}
 }
 
 func TestSaveConfig_WriteError(t *testing.T) {

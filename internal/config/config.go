@@ -16,6 +16,7 @@ type Config struct {
 	Plugins  PluginsConfig  `yaml:"plugins"`
 	REST     RESTConfig     `yaml:"rest"`
 	Logging  LoggingConfig  `yaml:"logging"`
+	DNSSEC   DNSSECConfig   `yaml:"dnssec"`
 }
 
 // ServerConfig contains DNS server settings
@@ -62,6 +63,33 @@ type RESTConfig struct {
 type LoggingConfig struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"`
+}
+
+// DNSSECConfig contains DNSSEC signing and validation settings. Both halves
+// are independently opt-in and default to disabled, so existing config
+// files are unaffected by this section's presence.
+type DNSSECConfig struct {
+	Signing    DNSSECSigningConfig    `yaml:"signing"`
+	Validation DNSSECValidationConfig `yaml:"validation"`
+}
+
+// DNSSECSigningConfig configures authoritative zone signing. KeyFile is a
+// path prefix: KeyFile+".key" holds the public DNSKEY RR and
+// KeyFile+".private" holds the private key, matching the layout written by
+// cmd/godns-keygen.
+type DNSSECSigningConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	Zone         string        `yaml:"zone"`
+	KeyFile      string        `yaml:"key_file"`
+	SignatureTTL time.Duration `yaml:"signature_ttl"`
+}
+
+// DNSSECValidationConfig configures validation of upstream responses.
+// TrustedKeyFiles lists paths to ".key" files (the public DNSKEY RR text
+// produced by cmd/godns-keygen) that are pinned as trusted.
+type DNSSECValidationConfig struct {
+	Enabled         bool     `yaml:"enabled"`
+	TrustedKeyFiles []string `yaml:"trusted_key_files"`
 }
 
 // LoadConfig loads configuration from a YAML file
@@ -132,6 +160,19 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 
+	// Parse DNSSEC signing signature TTL
+	if dnssecCfg, ok := rawConfig["dnssec"].(map[string]interface{}); ok {
+		if signingCfg, ok := dnssecCfg["signing"].(map[string]interface{}); ok {
+			if ttlStr, ok := signingCfg["signature_ttl"].(string); ok {
+				ttl, err := time.ParseDuration(ttlStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid dnssec signing signature_ttl duration: %v", err)
+				}
+				config.DNSSEC.Signing.SignatureTTL = ttl
+			}
+		}
+	}
+
 	return config, nil
 }
 
@@ -170,6 +211,11 @@ func applyDefaults(config *Config) {
 	}
 	if config.Logging.Format == "" {
 		config.Logging.Format = "text"
+	}
+
+	// DNSSEC defaults
+	if config.DNSSEC.Signing.SignatureTTL == 0 {
+		config.DNSSEC.Signing.SignatureTTL = time.Hour
 	}
 }
 
