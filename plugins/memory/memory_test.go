@@ -1,8 +1,10 @@
 package memory
 
 import (
+	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +18,15 @@ func stringsToIPs(ipStrings []string) []net.IP {
 		ips[i] = net.ParseIP(ipStr)
 	}
 	return ips
+}
+
+// generateBackendIPs returns n distinct synthetic backend IPs.
+func generateBackendIPs(n int) []net.IP {
+	ipStrings := make([]string, n)
+	for i := 0; i < n; i++ {
+		ipStrings[i] = fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
+	}
+	return stringsToIPs(ipStrings)
 }
 func TestMemoryPluginInit(t *testing.T) {
 	// Test initialization with valid config
@@ -239,4 +250,82 @@ func TestErrorHandling(t *testing.T) {
 	assert.True(t, mp.CanResolve("exists.local"))
 	// Case insensitive check
 	assert.True(t, mp.CanResolve("EXISTS.LOCAL"))
+}
+
+// TestRoundRobinConcurrentDistribution hammers the round-robin strategy with
+// concurrent Resolve calls across varying goroutine and backend counts and
+// asserts that every backend receives its fair share of requests, within the
+// deterministic floor(total/M)/ceil(total/M) bound guaranteed by a correct
+// atomic-counter-mod-M implementation. Run with -race to catch any data race
+// on the shared per-hostname counter.
+func TestRoundRobinConcurrentDistribution(t *testing.T) {
+	cases := []struct {
+		name                 string
+		goroutines           int
+		backends             int
+		requestsPerGoroutine int
+	}{
+		{"fewGoroutinesFewBackends", 4, 3, 5},
+		{"manyGoroutinesFewBackends", 50, 3, 10},
+		{"fewGoroutinesManyBackends", 3, 25, 4},
+		{"nonDivisibleRemainder", 7, 4, 5}, // total=35, 35%4=3 -> exercises both floor and ceil
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			config := map[string]interface{}{}
+			plugin, err := NewMemoryPlugin(config)
+			require.NoError(t, err)
+			mp := plugin.(*MemoryPlugin)
+
+			hostname := "loadtest.local"
+			backendIPs := generateBackendIPs(tc.backends)
+			require.NoError(t, mp.AddEntry(hostname, backendIPs))
+
+			// Read-only map from IP string to backend index, built once
+			// before the goroutines start so it adds no races of its own.
+			indexByIP := make(map[string]int, tc.backends)
+			for i, ip := range backendIPs {
+				indexByIP[ip.String()] = i
+			}
+
+			tallies := make([]int64, tc.backends)
+			var wg sync.WaitGroup
+			for g := 0; g < tc.goroutines; g++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for r := 0; r < tc.requestsPerGoroutine; r++ {
+						resolved, err := mp.Resolve(hostname)
+						if err != nil {
+							t.Errorf("Resolve returned error: %v", err)
+							return
+						}
+						idx, ok := indexByIP[resolved[0].String()]
+						if !ok {
+							t.Errorf("Resolve returned unregistered IP: %s", resolved[0])
+							return
+						}
+						atomic.AddInt64(&tallies[idx], 1)
+					}
+				}()
+			}
+			wg.Wait()
+
+			total := tc.goroutines * tc.requestsPerGoroutine
+			floor := int64(total / tc.backends)
+			ceil := floor
+			if total%tc.backends != 0 {
+				ceil = floor + 1
+			}
+
+			var sum int64
+			for i, count := range tallies {
+				sum += count
+				assert.True(t, count >= floor && count <= ceil,
+					"backend %d received %d requests, expected between %d and %d", i, count, floor, ceil)
+			}
+			assert.Equal(t, int64(total), sum, "total tallied resolutions should equal goroutines*requestsPerGoroutine")
+		})
+	}
 }
