@@ -10,9 +10,12 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/miekg/dns"
+
 	"github.com/yourusername/godns/internal/config"
 	"github.com/yourusername/godns/internal/rest"
 	"github.com/yourusername/godns/internal/server"
+	"github.com/yourusername/godns/plugins/dnssec"
 	"github.com/yourusername/godns/plugins/file"
 	"github.com/yourusername/godns/plugins/memory"
 )
@@ -61,6 +64,10 @@ func main() {
 	var memoryPlugin *memory.MemoryPlugin
 	if err := registerPlugins(dnsServer, cfg, &memoryPlugin); err != nil {
 		logger.Fatalf("Failed to register plugins: %v", err)
+	}
+
+	if err := initDNSSEC(dnsServer, cfg); err != nil {
+		logger.Fatalf("Failed to initialize DNSSEC: %v", err)
 	}
 
 	// Setup signal handling for graceful shutdown
@@ -176,6 +183,64 @@ func registerPlugins(dnsServer *server.DNSServer, cfg *config.Config, memoryPlug
 				logger.Warn("Could not cast memory plugin to expected type")
 			}
 		}
+	}
+
+	return nil
+}
+
+// initDNSSEC wires up DNSSEC signing and/or validation on dnsServer
+// according to cfg.DNSSEC. Both halves are independently opt-in; leaving
+// either disabled (the default) leaves the corresponding server hook nil.
+func initDNSSEC(dnsServer *server.DNSServer, cfg *config.Config) error {
+	if cfg.DNSSEC.Signing.Enabled {
+		logger.Infof("Initializing DNSSEC signing for zone %s", cfg.DNSSEC.Signing.Zone)
+
+		key, priv, err := dnssec.LoadKey(cfg.DNSSEC.Signing.KeyFile)
+		if err != nil {
+			return fmt.Errorf("failed to load DNSSEC signing key: %w", err)
+		}
+
+		signer, err := dnssec.NewSigner(cfg.DNSSEC.Signing.Zone, key, priv, cfg.DNSSEC.Signing.SignatureTTL)
+		if err != nil {
+			return fmt.Errorf("failed to initialize DNSSEC signer: %w", err)
+		}
+
+		dnsServer.SetSigner(signer)
+	}
+
+	if cfg.DNSSEC.Validation.Enabled {
+		logger.Info("Initializing DNSSEC validation of upstream responses")
+
+		if len(cfg.DNSSEC.Validation.TrustedKeyFiles) == 0 {
+			return fmt.Errorf("dnssec validation is enabled but no trusted_key_files are configured")
+		}
+
+		var trustedKeys []*dns.DNSKEY
+		for _, keyFile := range cfg.DNSSEC.Validation.TrustedKeyFiles {
+			data, err := os.ReadFile(keyFile)
+			if err != nil {
+				return fmt.Errorf("failed to read trusted DNSKEY file %s: %w", keyFile, err)
+			}
+
+			rr, err := dns.NewRR(string(data))
+			if err != nil {
+				return fmt.Errorf("failed to parse trusted DNSKEY file %s: %w", keyFile, err)
+			}
+
+			key, ok := rr.(*dns.DNSKEY)
+			if !ok {
+				return fmt.Errorf("trusted key file %s does not contain a DNSKEY record", keyFile)
+			}
+
+			trustedKeys = append(trustedKeys, key)
+		}
+
+		validator, err := dnssec.NewValidator(trustedKeys)
+		if err != nil {
+			return fmt.Errorf("failed to initialize DNSSEC validator: %w", err)
+		}
+
+		dnsServer.SetValidator(validator)
 	}
 
 	return nil
