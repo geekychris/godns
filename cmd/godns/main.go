@@ -78,7 +78,7 @@ func main() {
 		}
 
 		// Create REST server
-		restServer = rest.NewServer(cfg, logger, memoryPlugin)
+		restServer = rest.NewServer(cfg, logger, memoryPlugin, dnsServer.Metrics())
 		logger.Infof("REST API server configured on %s:%d", cfg.REST.Address, cfg.REST.Port)
 
 		// Set REST server in DNS server for clean shutdown

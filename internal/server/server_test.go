@@ -7,12 +7,15 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yourusername/godns/internal/config"
+	"github.com/yourusername/godns/internal/metrics"
 )
 
 // MockResolver is a mock implementation of the Resolver interface
@@ -588,4 +591,130 @@ func TestCompleteSystemIntegration(t *testing.T) {
 	aaaaResp := mockWriter.writtenMsg
 	require.NotNil(t, aaaaResp)
 	assert.Equal(t, 0, len(aaaaResp.Answer), "Should have no answers for AAAA query")
+}
+
+// TestMetricsInstrumentation verifies that handleDNSRequest records cache
+// hit/miss counts, per-strategy query latency, and plugin failure counts.
+func TestMetricsInstrumentation(t *testing.T) {
+	const hostname = "metrics-test.example.com"
+	const resolverName = "mock-resolver"
+
+	tests := []struct {
+		name           string
+		setup          func(cfg *config.Config, server *DNSServer, resolver *MockResolver)
+		wantCacheHit   float64
+		wantCacheMiss  float64
+		wantPluginFail float64
+		wantLatency    map[string]uint64
+	}{
+		{
+			name: "cache hit",
+			setup: func(cfg *config.Config, server *DNSServer, resolver *MockResolver) {
+				server.cacheResult(hostname, []net.IP{net.ParseIP("10.0.0.1")})
+			},
+			wantCacheHit:  1,
+			wantCacheMiss: 0,
+			wantLatency:   map[string]uint64{metrics.StrategyCache: 1},
+		},
+		{
+			name: "cache miss then plugin success",
+			setup: func(cfg *config.Config, server *DNSServer, resolver *MockResolver) {
+				resolver.On("CanResolve", hostname).Return(true)
+				resolver.On("Resolve", hostname).Return([]net.IP{net.ParseIP("10.0.0.2")}, nil)
+				server.RegisterResolver(resolver)
+			},
+			wantCacheHit:  0,
+			wantCacheMiss: 1,
+			wantLatency:   map[string]uint64{metrics.StrategyPlugin: 1},
+		},
+		{
+			name: "plugin failure",
+			setup: func(cfg *config.Config, server *DNSServer, resolver *MockResolver) {
+				cfg.Upstream.Servers = nil
+				resolver.On("CanResolve", hostname).Return(true)
+				resolver.On("Resolve", hostname).Return([]net.IP(nil), fmt.Errorf("resolve boom"))
+				server.RegisterResolver(resolver)
+			},
+			wantCacheHit:   0,
+			wantCacheMiss:  1,
+			wantPluginFail: 1,
+			wantLatency:    map[string]uint64{metrics.StrategyFailed: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := createTestConfig()
+			logger := createTestLogger()
+			server := NewDNSServer(cfg, logger)
+
+			resolver := new(MockResolver)
+			resolver.On("Name").Return(resolverName)
+
+			tt.setup(cfg, server, resolver)
+
+			q := new(dns.Msg)
+			q.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
+			writer := &MockResponseWriter{}
+			server.handleDNSRequest(writer, q)
+
+			reg := server.Metrics().Registry()
+
+			assert.Equal(t, tt.wantCacheHit, counterValue(t, reg, "godns_cache_lookups_total", "result", metrics.CacheHit))
+			assert.Equal(t, tt.wantCacheMiss, counterValue(t, reg, "godns_cache_lookups_total", "result", metrics.CacheMiss))
+			assert.Equal(t, tt.wantPluginFail, counterValue(t, reg, "godns_plugin_failures_total", "plugin", resolverName))
+
+			for strategy, want := range tt.wantLatency {
+				assert.Equal(t, want, histogramSampleCount(t, reg, "godns_query_duration_seconds", "strategy", strategy))
+			}
+		})
+	}
+}
+
+// counterValue reads the value of a Prometheus counter series identified by
+// metricName and a single label match from the registry's current snapshot.
+// Returns 0 if the series was never created (e.g. the label value was never
+// observed).
+func counterValue(t *testing.T, reg *prometheus.Registry, metricName, labelName, labelValue string) float64 {
+	t.Helper()
+
+	m := findMetric(t, reg, metricName, labelName, labelValue)
+	if m == nil {
+		return 0
+	}
+	return m.GetCounter().GetValue()
+}
+
+// histogramSampleCount reads the observation count of a Prometheus histogram
+// series identified by metricName and a single label match. Returns 0 if the
+// series was never created.
+func histogramSampleCount(t *testing.T, reg *prometheus.Registry, metricName, labelName, labelValue string) uint64 {
+	t.Helper()
+
+	m := findMetric(t, reg, metricName, labelName, labelValue)
+	if m == nil {
+		return 0
+	}
+	return m.GetHistogram().GetSampleCount()
+}
+
+func findMetric(t *testing.T, reg *prometheus.Registry, metricName, labelName, labelValue string) *dto.Metric {
+	t.Helper()
+
+	families, err := reg.Gather()
+	require.NoError(t, err)
+
+	for _, fam := range families {
+		if fam.GetName() != metricName {
+			continue
+		}
+		for _, m := range fam.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == labelName && lp.GetValue() == labelValue {
+					return m
+				}
+			}
+		}
+	}
+	return nil
 }

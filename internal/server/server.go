@@ -11,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/yourusername/godns/internal/config"
+	"github.com/yourusername/godns/internal/metrics"
 	"github.com/yourusername/godns/internal/rest"
 	"github.com/yourusername/godns/pkg/api"
 )
@@ -24,7 +25,7 @@ type DNSServer struct {
 	resolvers    []api.Resolver
 	resolverLock sync.RWMutex
 	logger       *logrus.Logger
-	metrics      *metrics
+	metrics      *metrics.Metrics
 	restServer   rest.Server
 }
 
@@ -34,16 +35,6 @@ type cacheEntry struct {
 	expiresAt time.Time
 }
 
-// metrics tracks server statistics
-type metrics struct {
-	totalQueries      uint64
-	cacheHits         uint64
-	pluginResolutions uint64
-	forwardedQueries  uint64
-	failedQueries     uint64
-	mutex             sync.Mutex
-}
-
 // NewDNSServer creates a new DNS server instance
 func NewDNSServer(cfg *config.Config, logger *logrus.Logger) *DNSServer {
 	return &DNSServer{
@@ -51,8 +42,13 @@ func NewDNSServer(cfg *config.Config, logger *logrus.Logger) *DNSServer {
 		cache:     make(map[string]*cacheEntry),
 		resolvers: make([]api.Resolver, 0),
 		logger:    logger,
-		metrics:   &metrics{},
+		metrics:   metrics.New(),
 	}
+}
+
+// Metrics returns the Prometheus metrics collectors for this server.
+func (s *DNSServer) Metrics() *metrics.Metrics {
+	return s.metrics
 }
 
 // RegisterResolver registers a plugin resolver with the server
@@ -130,10 +126,6 @@ func (s *DNSServer) Stop() error {
 
 // handleDNSRequest handles incoming DNS requests
 func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
-	s.metrics.mutex.Lock()
-	s.metrics.totalQueries++
-	s.metrics.mutex.Unlock()
-
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Authoritative = true
@@ -143,6 +135,7 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 
 		// Only handle A record queries for now
 		if q.Qtype == dns.TypeA {
+			start := time.Now()
 			hostname := q.Name
 			// Remove trailing dot from hostname if present
 			if len(hostname) > 0 && hostname[len(hostname)-1] == '.' {
@@ -167,12 +160,13 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 					m.Answer = append(m.Answer, rr)
 				}
 
-				s.metrics.mutex.Lock()
-				s.metrics.cacheHits++
-				s.metrics.mutex.Unlock()
+				s.metrics.IncCacheHit()
+				s.metrics.ObserveQueryLatency(metrics.StrategyCache, time.Since(start))
 
 				continue
 			}
+
+			s.metrics.IncCacheMiss()
 
 			// Try to resolve using plugins
 			resolved := false
@@ -196,9 +190,7 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 					m.Answer = append(m.Answer, rr)
 				}
 
-				s.metrics.mutex.Lock()
-				s.metrics.pluginResolutions++
-				s.metrics.mutex.Unlock()
+				s.metrics.ObserveQueryLatency(metrics.StrategyPlugin, time.Since(start))
 
 				resolved = true
 			}
@@ -225,9 +217,7 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 						m.Answer = append(m.Answer, rr)
 					}
 
-					s.metrics.mutex.Lock()
-					s.metrics.forwardedQueries++
-					s.metrics.mutex.Unlock()
+					s.metrics.ObserveQueryLatency(metrics.StrategyUpstream, time.Since(start))
 
 					resolved = true
 				}
@@ -239,9 +229,7 @@ func (s *DNSServer) handleDNSRequest(w dns.ResponseWriter, r *dns.Msg) {
 				// Set NXDOMAIN (Name Error) response code for unresolvable hostnames
 				m.SetRcode(r, dns.RcodeNameError)
 
-				s.metrics.mutex.Lock()
-				s.metrics.failedQueries++
-				s.metrics.mutex.Unlock()
+				s.metrics.ObserveQueryLatency(metrics.StrategyFailed, time.Since(start))
 			}
 		} else {
 			// For non-A record types, forward directly to upstream
@@ -305,7 +293,11 @@ func (s *DNSServer) resolveWithPlugins(hostname string) ([]net.IP, error) {
 	for _, resolver := range s.resolvers {
 		if resolver.CanResolve(hostname) {
 			s.logger.Debugf("Resolver %s can resolve %s", resolver.Name(), hostname)
-			return resolver.Resolve(hostname)
+			ips, err := resolver.Resolve(hostname)
+			if err != nil {
+				s.metrics.IncPluginFailure(resolver.Name())
+			}
+			return ips, err
 		}
 	}
 
