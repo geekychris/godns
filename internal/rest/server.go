@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 
 	"github.com/yourusername/godns/internal/config"
+	"github.com/yourusername/godns/internal/metrics"
 	"github.com/yourusername/godns/plugins/memory"
 )
 
@@ -29,7 +31,7 @@ type RESTServer struct {
 }
 
 // NewServer creates a new REST API server
-func NewServer(cfg *config.Config, logger *logrus.Logger, memoryPlugin *memory.MemoryPlugin) Server {
+func NewServer(cfg *config.Config, logger *logrus.Logger, memoryPlugin *memory.MemoryPlugin, m *metrics.Metrics) Server {
 	logger.Debug("Creating new REST API server")
 
 	router := mux.NewRouter()
@@ -44,6 +46,9 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, memoryPlugin *memory.M
 	// Create and register the handler
 	handler := NewHandler(logger, memoryPlugin)
 	handler.RegisterRoutes(router)
+
+	// Expose Prometheus metrics
+	router.Handle("/metrics", promhttp.HandlerFor(m.Registry(), promhttp.HandlerOpts{})).Methods(http.MethodGet)
 
 	// Set up middleware
 	router.Use(server.loggingMiddleware)
